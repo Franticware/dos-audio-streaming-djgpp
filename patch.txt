@@ -1,0 +1,31 @@
+(This is the reply to a report about gcc-programs crashing after allocating
+ both DOS and standard memory. It concerns go32 1.11.maint5)
+
+Hi
+
+I experienced the same problem lately. There is a bug in go32, in valloc.c.
+I have fixed this and sent this fix to DJ, but I didn`t get the confirmation,
+so I send it to you.
+The base memory is allocated, but the same pages are reallocated again for
+protected mode program.
+                             Grzegorz W. Jablonski
+                              grzegorz@kmm-lx.p.lodz.pl
+
+*** valloc.org	Thu Feb 17 01:40:00 1994
+--- valloc.c	Fri May  6 18:40:54 1994
+***************
+*** 254,263 ****
+--- 254,265 ----
+      r.r_ax = 0x4a00;    /* modify real memory size */
+      r.r_bx = lol;
+      r.r_es = valloc_lowmem_page;
+  /*    printf("to %d (0x%04x)\n", lol, valloc_lowmem_page); */
+      intr(0x21, &r);
++     /* GWJ change 1994-05-06 */
++     pn_lo_last = ((valloc_lowmem_page+lol-0x100)>>8); /* highest real mem 4K block */
+    }
+  /*  else
+    {
+      printf("most avail pages is %d (wanted %d)\n", pn_lo_last - pn_lo_next, pages);
+    } */
+
