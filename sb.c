@@ -23,11 +23,14 @@
  *                                  - removed memcpy due to new dpmi-style
  *                                    of djgpp
  *              <kordmann@ldv01.Uni-Trier.de>
+ *  27-Dec-2023 Vojtech Salajka     - added streaming playback
+ *                                  - removed fixed playback and recording
  */
 #include "sb.h"
 #include <dos.h>
 #include <pc.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -57,9 +60,7 @@ static char* sb_buf[2];
 static unsigned int sb_buflen[2];
 
 /* Info about current sample */
-static unsigned char* sb_curdata;  /* pointer to next bit of data */
-static unsigned long sb_curlength; /* total length length left to play */
-static int HIGHSPEED;              /* flag for normal/highspeed DMA */
+static int HIGHSPEED; /* flag for normal/highspeed DMA */
 
 
 /* DMA chunk size, in bytes.
@@ -80,148 +81,11 @@ static int HIGHSPEED;              /* flag for normal/highspeed DMA */
  * effects should be "instantaneous".
  *
  */
-#define DMA_CHUNK (16000)
+#define DMA_CHUNK (1024)
 
-
-/* Interrupt handler for recording
- *
- * This is called in both protected mode and in real mode -- this means
- * we don't have to switch modes when we service the interrupt.
- */
-void sb_intr_rec(_go32_dpmi_registers* reg)
-{
-    register unsigned n = sb_bufnum; /* buffer we just recorded */
-
-    inportb(sb_ioaddr + SB_DSP_DATA_AVAIL); /* Acknowledge soundblaster */
-
-    sb_rec_buffer(1 - n); /* Start next buffer recording */
-
-    sb_empty_buffer(n); /* Save this buffer */
-
-    outportb(0x20, 0x20); /* Acknowledge the interrupt */
-
-    enable();
-}
-
-/* Save buffer n in sb_curdata and calculate size for next time */
-void sb_empty_buffer(register unsigned n)
-{
-    if (sb_buflen[n] > 0)
-    {
-        dosmemget((unsigned long)sb_buf[n], sb_buflen[n], sb_curdata);
-        sb_curdata += sb_buflen[n];
-        sb_curlength -= sb_buflen[n];
-
-        /* for determination of buffersize keep in mind, that right now  */
-        /*  the other buffer is recording up to DMA_CHUNK bytes. Only if */
-        /*  - after saving this other buffer - there is still work to do,*/
-        /*  then this buffer can take the rest in the next round         */
-        if (sb_curlength > DMA_CHUNK)
-        {
-            if (sb_curlength > 2 * DMA_CHUNK)
-                sb_buflen[n] = DMA_CHUNK;
-            else
-                sb_buflen[n] = sb_curlength - DMA_CHUNK;
-        }
-        else
-            sb_buflen[n] = 0;
-    }
-}
-
-void sb_rec_buffer(register unsigned n)
-{
-    int t;
-    unsigned char im, tm;
-
-    if (sb_buflen[n] == 0)
-    { /* See if we're already done */
-        sb_dma_active = 0;
-        return;
-    }
-    disable();
-
-    im = inportb(0x21); /* Enable interrupts on PIC */
-    tm = ~(1 << sb_irq);
-    outportb(0x21, im & tm);
-
-    outportb(SB_DMA_MASK, 5); /* Set DMA mode to 'record' */
-    outportb(SB_DMA_FF, 0);
-    outportb(SB_DMA_MODE, 0x45);
-
-    sb_bufnum = n; /* Set transfer address */
-    t = (int)((unsigned long)sb_buf[n] >> 16);
-    outportb(SB_DMAPAGE + 3, t & 0xFF);
-    t = (int)((unsigned long)sb_buf[n] & 0xFFFF);
-    outportb(SB_DMA + 2 * sb_dmachan, t & 0xFF);
-    outportb(SB_DMA + 2 * sb_dmachan, t >> 8);
-    /* Set transfer length byte count */
-    outportb(SB_DMA + 2 * sb_dmachan + 1, (sb_buflen[n] - 1) & 0xFF);
-    outportb(SB_DMA + 2 * sb_dmachan + 1, (sb_buflen[n] - 1) >> 8);
-
-    outportb(SB_DMA_MASK, sb_dmachan); /* Unmask DMA channel */
-
-    enable();
-
-    if (HIGHSPEED)
-    {
-        sb_writedac(SB_SET_BLOCKSIZE); /* prepare block programming */
-    }
-    else
-    {
-        sb_writedac(SB_DMA_ADC); /* command byte for DMA ADC transfer */
-    }
-
-
-    sb_writedac((sb_buflen[n] - 1) & 0xFF); /* sb_write length */
-    sb_writedac((sb_buflen[n] - 1) >> 8);
-
-    if (HIGHSPEED)
-        sb_writedac(SB_HIGH_DMA_8_BIT_ADC); /* command byte for high speed DMA ADC transfer */
-
-    sb_dma_active = 1; /* A sound is recorded now. */
-}
-
-/* Record a sample through the ADC using DMA. */
-/* return number of bytes actually recorded */
-unsigned long sb_rec(unsigned char* data, unsigned long length)
-{
-    sb_install_interrupts(sb_intr_rec); /* Install our interrupt handlers */
-
-    sb_curdata = data; /* Prime the buffers */
-    sb_curlength = length;
-    if (length > DMA_CHUNK)
-        sb_buflen[0] = DMA_CHUNK;
-    else
-        sb_buflen[0] = length;
-
-    if (length <= DMA_CHUNK)
-        sb_buflen[1] = 0;
-    else if (length > 2 * DMA_CHUNK)
-        sb_buflen[1] = DMA_CHUNK;
-    else
-        sb_buflen[1] = length - DMA_CHUNK;
-
-    sb_rec_buffer(0); /* Start the first buffer recording.    */
-    while (sb_dma_active)
-        if (kbhit())
-        { /* kbhit crashed sometimes              */
-            int rest;
-            rest = sb_read_counter(); /* samples still to record      */
-            if (HIGHSPEED)
-                sb_reset(); /* writedac blocked in HS mode  */
-            else
-                sb_writedac(SB_HALT_DMA);       /* stop playing                 */
-            rest = sb_buflen[sb_bufnum] - rest; /* samples already recorded  */
-            length -= (sb_curlength - rest);    /* total samples recorded       */
-            sb_buflen[sb_bufnum] = rest;        /* save those samples           */
-            sb_empty_buffer(sb_bufnum);
-            sb_dma_active = 0;                              /* and exit the loop            */
-            sb_buflen[0] = sb_buflen[1] = sb_curlength = 0; /* clean up     */
-        }
-    sb_cleanup_ints(); /* remove interrupts */
-    return length;
-}
-
+static char sb_stream_buf[DMA_CHUNK];
+static char sb_stream_silence[DMA_CHUNK];
+static volatile char sb_stream_ready = 0;
 
 void sb_intr_play(_go32_dpmi_registers* reg)
 {
@@ -241,24 +105,16 @@ void sb_intr_play(_go32_dpmi_registers* reg)
 /* Fill buffer n with the next data. */
 void sb_fill_buffer(register unsigned n)
 {
-    if (sb_curlength > DMA_CHUNK)
+    if (sb_stream_ready)
     {
         sb_buflen[n] = DMA_CHUNK;
-        dosmemput(sb_curdata, DMA_CHUNK, (unsigned long)sb_buf[n]);
-        sb_curlength -= DMA_CHUNK;
-        sb_curdata += DMA_CHUNK;
-    }
-    else if (sb_curlength <= 0)
-    {
-        sb_buflen[n] = 0;
-        sb_curlength = 0;
+        dosmemput(sb_stream_buf, DMA_CHUNK, (unsigned long)sb_buf[n]);
+        sb_stream_ready = 0;
     }
     else
     {
-        sb_buflen[n] = sb_curlength;
-        dosmemput(sb_curdata, sb_curlength, (unsigned long)sb_buf[n]);
-        sb_curdata += sb_curlength;
-        sb_curlength = 0;
+        sb_buflen[n] = DMA_CHUNK;
+        dosmemput(sb_stream_silence, DMA_CHUNK, (unsigned long)sb_buf[n]);
     }
 }
 
@@ -311,39 +167,6 @@ void sb_play_buffer(register unsigned n)
         sb_writedac(SB_HIGH_DMA_8_BIT_DAC); /* command byte for high speed DMA DAC transfer */
 
     sb_dma_active = 1; /* A sound is playing now. */
-}
-
-/* Play a sample through the DAC using DMA. */
-void sb_play(unsigned char* data, unsigned long length)
-{
-
-    sb_install_interrupts(sb_intr_play); /* Install our interrupt handlers */
-
-    sb_curdata = data; /* Prime the buffers */
-    sb_curlength = length;
-
-    sb_fill_buffer(0);
-    sb_fill_buffer(1);
-
-    sb_play_buffer(0); /* Start the first buffer playing.	*/
-    while (sb_dma_active)
-    { /* keyboard overflow crashes	*/
-        if (kbhit())
-        { /*  so did kbhit()              */
-            if (getch() == 27)
-            {
-                if (HIGHSPEED)
-                    sb_reset(); /* writedac blocked in HS mode */
-                else
-                    sb_writedac(SB_HALT_DMA);
-                sb_dma_active = 0;
-                sb_buflen[0] = sb_buflen[1] = sb_curlength = 0;
-            }
-            else
-                kbclear();
-        }
-    }
-    sb_cleanup_ints(); /* remove interrupts */
 }
 
 /* Set sampling/playback rate.
@@ -559,10 +382,13 @@ int sb_init_buffers()
         return (0);
     }
 
-    (unsigned long)sb_buf[0] = dosmem.rm_segment * 16;
-    (unsigned long)sb_buf[0] += 0x0FFFFL;
-    (unsigned long)sb_buf[0] &= 0xFFFF0000L;
-    (unsigned long)sb_buf[1] = (unsigned long)sb_buf[0] + 0x10000;
+    unsigned long sb_buf_aux[2];
+
+    sb_buf_aux[0] = dosmem.rm_segment * 16;
+    sb_buf_aux[0] += 0x0FFFFL;
+    sb_buf_aux[0] &= 0xFFFF0000L;
+    sb_buf_aux[1] = sb_buf_aux[0] + 0x10000;
+    memcpy(sb_buf, sb_buf_aux, sizeof(sb_buf_aux));
     return (1);
 }
 
@@ -588,7 +414,6 @@ int sb_init()
     return (sb_ioaddr);
 }
 
-
 /* Remove interrupt handlers */
 void sb_cleanup_ints()
 {
@@ -606,7 +431,7 @@ int sb_cleanup()
         return (1);
     if (!_go32_dpmi_free_dos_memory(&dosmem))
     {
-        printf("Unable to free dos memory");
+        printf("Unable to free dos memory\n");
         return (0);
     }
     return (1);
@@ -618,7 +443,6 @@ int sb_read_counter(void)
     outportb(SB_DMA_FF, 0);
     return (inportb(SB_DMA + 2 * sb_dmachan + 1) + 256 * inportb(SB_DMA + 2 * sb_dmachan + 1));
 }
-
 
 void sb_reset(void)
 {
@@ -648,21 +472,46 @@ void kbclear(void)
     dosmemput(&buffer, 2, 0x41c);
 }
 
-
-/*
- * Convenient wrappers for the sound functions
- */
-void SoundPlay(int Rate, char* data, unsigned long length)
+void StreamStart(int Rate)
 {
+    for (int i = 0; i != DMA_CHUNK; ++i)
+    {
+        sb_stream_silence[i] = 128;
+    }
+
     sb_voice(1);
     sb_set_sample_rate(Rate);
-    sb_play(data, length);
-    sb_voice(0);
+
+    sb_install_interrupts(sb_intr_play); /* Install our interrupt handlers */
+
+    sb_fill_buffer(0);
+    sb_fill_buffer(1);
+
+    sb_play_buffer(0); /* Start the first buffer playing.	*/
 }
 
-
-unsigned long SoundRec(int Rate, char* data, unsigned long length)
+unsigned char* StreamBuf(size_t* len)
 {
-    sb_set_sample_rate(Rate);
-    return (sb_rec(data, length));
+    if (sb_stream_ready)
+    {
+        return 0;
+    }
+    *len = DMA_CHUNK;
+    return (unsigned char*)sb_stream_buf;
+}
+
+void StreamReady()
+{
+    sb_stream_ready = 1;
+}
+
+void StreamStop()
+{
+    if (HIGHSPEED)
+        sb_reset(); /* writedac blocked in HS mode */
+    else
+        sb_writedac(SB_HALT_DMA);
+
+    sb_cleanup_ints(); /* remove interrupts */
+    sb_voice(0);
 }

@@ -111,11 +111,6 @@ extern unsigned int sb_type;
         outportb(sb_ioaddr + SB_MIXER_DATA, (y));    \
     }
 
-void sb_intr_rec(_go32_dpmi_registers* reg);
-void sb_empty_buffer(register unsigned n);
-void sb_rec_buffer(register unsigned n);
-unsigned long sb_rec(unsigned char* data, unsigned long length);
-
 void sb_intr_play(_go32_dpmi_registers* reg);
 void sb_fill_buffer(register unsigned n);
 void sb_play_buffer(register unsigned n);
@@ -137,11 +132,13 @@ void sb_cleanup_pm_interrupt();
 void sb_cleanup_ints();
 int sb_cleanup();
 
-void SoundPlay(int Rate, char* data, unsigned long length);
-unsigned long SoundRec(int Rate, char* data, unsigned long length);
-
 int sb_read_counter(void);
 void sb_reset(void);
 void kbclear(void);
+
+void StreamStart(int Rate);
+unsigned char* StreamBuf(size_t* len);
+void StreamReady();
+void StreamStop();
 
 #endif

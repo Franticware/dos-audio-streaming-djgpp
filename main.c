@@ -1,81 +1,76 @@
 /* Example program how to use the routines of the soundblaster library
- * for playing and recording files
+ * for streamed audio playback
  */
 
 #include "sb.h"
+#include <dos.h>
 #include <gppconio.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-#define PLAY   0
-#define RECORD 1
+#include <string.h>
 
 int main(int argc, char** argv)
 {
-    unsigned long Rate = 12000;
-    int time = 2000;
-    char* Data;
-    int Length;
-    char* Name = "test.wav";
-    int i = 0;
-    int mode = PLAY;
-
+    const unsigned long Rate = 22050;
     if (!sb_init())
     {
         printf("Cannot init card\n");
         exit(1);
     }
-    for (i = 1; i < argc; i++)
+    StreamStart(Rate);
+    FILE* fin = fopen("brahms5.wav", "rb");
+    if (fin)
     {
-        if (*argv[i] == '-')
-            switch (argv[i][1])
+        // skip wav header
+        fseek(fin, 44, SEEK_SET);
+    }
+    for (;;)
+    {
+        size_t len;
+        unsigned char* stream = StreamBuf(&len);
+        if (stream)
+        {
+            if (fin)
             {
-                case 'r':
-                case 'R':
-                    mode = RECORD;
-                    break;
-                case 'f':
-                case 'F':
-                    if (!(Rate = atoi(&(argv[i][2]))))
-                    {
-                        printf("illegal recording frequency %s, using 12000\n", &(argv[i][2]));
-                        Rate = 12000;
-                    }
-                    break;
-                case 't':
-                case 'T':
-                    if (!(time = atoi(&(argv[i][2]))))
-                    {
-                        printf("illegal recording time %s ms, using 2000 ms\n", &(argv[i][2]));
-                        time = 2000;
-                    }
-                    break;
-                default:
-                    printf("illegal option %s\n", argv[i]);
-                    break;
+                size_t bytesRead = fread(stream, 1, len, fin);
+                if (bytesRead < len)
+                {
+                    memset(stream + bytesRead, 128, len - bytesRead);
+                    fclose(fin);
+                    fin = 0;
+                }
             }
-        else
-            Name = argv[i];
+            else
+            {
+                memset(stream, 128, len);
+            }
+            StreamReady();
+        }
+        const int delay_values[4] = {25, 50, 100, 1000};
+        if (kbhit())
+        {
+            int key = getch();
+            if (key == 27)
+            {
+                break;
+            }
+            else if (key >= '1' && key <= '4')
+            {
+                int delay_value = delay_values[key - '1'];
+                printf("not updating stream for ~%d ms\n", delay_value);
+                delay(delay_value);
+            }
+            else
+            {
+                kbclear();
+            }
+        }
     }
-    if (mode == PLAY)
+    if (fin)
     {
-        Data = get_wav_data(&Length, &Rate, Name);
-        if (!Data)
-            printf("cannot load file %s\n", Name);
-        SoundPlay(Rate, Data, Length);
+        fclose(fin);
     }
-    else
-    {
-        Length = (time * Rate) / 1000;
-        Data = malloc(Length);
-        printf("Recording %d ms with %d Hz, = %d byte\n", time, Rate, Length);
-        SoundRec(Rate, Data, Length);
-        printf("Ready\n");
-        put_wav_data(Data, Length, Rate, Name);
-    }
-    if (Data)
-        free(Data);
+    StreamStop();
     sb_cleanup();
-    argc = argc; /* Just to shut up the warning gcc gives... */
-    return (1);
+    return 1;
 }
